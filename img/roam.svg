@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="back" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" style="stop-color:#23202b"/>
+      <stop offset="100%" style="stop-color:#0a0910"/>
+    </radialGradient>
+  </defs>
+  <circle cx="128" cy="128" r="124" fill="url(#back)"/>
+
+  <!-- the waves a network sends, widening out from the dot you join -->
+  <g fill="none" stroke-linecap="round">
+    <path d="M58 118 A 100 100 0 0 1 198 118" stroke="#f74c00" stroke-width="14" opacity="0.45"/>
+    <path d="M80 142 A 68 68 0 0 1 176 142" stroke="#f74c00" stroke-width="14" opacity="0.7"/>
+    <path d="M102 166 A 36 36 0 0 1 154 166" stroke="#ffb066" stroke-width="14"/>
+  </g>
+  <circle cx="128" cy="190" r="11" fill="#ffb066"/>
+
+  <circle cx="128" cy="128" r="124" fill="none" stroke="#f74c00" stroke-width="3" stroke-opacity=".9"/>
+  <circle cx="128" cy="128" r="118" fill="none" stroke="#ffb066" stroke-width="1" stroke-opacity=".5"/>
+</svg>

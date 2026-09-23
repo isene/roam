@@ -1,0 +1,18 @@
+[package]
+name = "roam"
+version = "0.1.0"
+edition = "2021"
+description = "Wi-Fi and VPN in the terminal, straight to NetworkManager, and nothing running while you are not looking"
+license = "Unlicense"
+repository = "https://github.com/isene/roam"
+authors = ["Geir Isene <g@isene.com>"]
+
+[dependencies]
+crust = { version = "0.1", path = "../crust", package = "fe2o3-crust" }
+zbus = { version = "5", features = ["blocking-api"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
