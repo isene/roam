@@ -275,20 +275,16 @@ impl Roam {
         let w = cols as usize;
         let mut out = String::new();
 
-        // The bar across the top: what you are on, and the version.
-        let left = format!(
-            " {}   {}",
-            style::rgb("roam", Some(RUST_RGB), Some(BAR_BG), "b"),
-            style::rgb(&self.look.now, Some((220, 220, 225)), Some(BAR_BG), "")
-        );
-        let right = format!("v{} ", env!("CARGO_PKG_VERSION"));
-        let gap = w.saturating_sub(crust::display_width(&left) + right.len());
+        // The bar across the top: what you are on. Every piece carries
+        // the bar's background, spaces included, so it runs unbroken.
+        let now = format!("   {}", self.look.now);
+        let used = 1 + "roam".len() + crust::display_width(&now);
         out.push_str(&format!(
             "{}{}{}{}",
             Cursor::at(1, 1),
-            left,
-            style::rgb(&" ".repeat(gap), None, Some(BAR_BG), ""),
-            style::rgb(&right, Some(DIM_RGB), Some(BAR_BG), "")
+            style::rgb(" ", None, Some(BAR_BG), ""),
+            style::rgb("roam", Some(RUST_RGB), Some(BAR_BG), "b"),
+            style::rgb(&format!("{now}{}", " ".repeat(w.saturating_sub(used))), Some((220, 220, 225)), Some(BAR_BG), "")
         ));
 
         // The list, scrolled so the cursor stays in view.
@@ -341,12 +337,16 @@ impl Roam {
         } else {
             self.note.clone()
         };
-        let foot = format!(" {}", take_cells(&foot, w.saturating_sub(2)));
-        let pad = w.saturating_sub(crust::display_width(&foot));
+        // The version at the far right, as across the suite.
+        let version = format!("v{} ", env!("CARGO_PKG_VERSION"));
+        let room = w.saturating_sub(version.len() + 3);
+        let foot = format!(" {}", take_cells(&foot, room));
+        let pad = w.saturating_sub(crust::display_width(&foot) + version.len());
         out.push_str(&format!(
-            "{}{}",
+            "{}{}{}",
             Cursor::at(1, rows),
-            style::rgb(&format!("{foot}{}", " ".repeat(pad)), Some((200, 200, 205)), Some(BAR_BG), "")
+            style::rgb(&format!("{foot}{}", " ".repeat(pad)), Some((200, 200, 205)), Some(BAR_BG), ""),
+            style::rgb(&version, Some(DIM_RGB), Some(BAR_BG), "")
         ));
         print!("{out}");
         std::io::stdout().flush().ok();
