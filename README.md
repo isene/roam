@@ -24,6 +24,7 @@ roam
 | `f` | Forget a saved network, password and all |
 | `r` | Look for networks again |
 | `w` | Wi-Fi radio on or off |
+| `?` | This list, in a box |
 | `q` | Quit |
 
 A locked network nobody has saved asks for its password, hidden as you type. A saved one joins without asking.

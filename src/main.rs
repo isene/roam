@@ -7,7 +7,7 @@
 
 mod nm;
 
-use crust::{seq, style, Crust, Cursor, Input, Pane};
+use crust::{seq, style, Crust, Cursor, Input, Pane, Popup};
 use nm::{Lock, Look, Nm, Outcome};
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -103,14 +103,29 @@ impl Roam {
             let rows = self.rows();
             match key.as_str() {
                 "q" | "ESC" => return,
+                // Moving on puts the key legend back in place of a note.
                 "j" | "DOWN" => {
                     if self.sel + 1 < rows.len() {
                         self.sel += 1;
                     }
+                    self.note.clear();
                 }
-                "k" | "UP" => self.sel = self.sel.saturating_sub(1),
-                "g" | "HOME" => self.sel = 0,
-                "G" | "END" => self.sel = rows.len().saturating_sub(1),
+                "k" | "UP" => {
+                    self.sel = self.sel.saturating_sub(1);
+                    self.note.clear();
+                }
+                "g" | "HOME" => {
+                    self.sel = 0;
+                    self.note.clear();
+                }
+                "G" | "END" => {
+                    self.sel = rows.len().saturating_sub(1);
+                    self.note.clear();
+                }
+                "?" => {
+                    help();
+                    Crust::clear_screen();
+                }
                 "ENTER" => self.enter(),
                 "d" => self.leave(),
                 "f" => self.forget(),
@@ -333,7 +348,7 @@ impl Roam {
 
         // The bar along the bottom: what just happened, or the keys.
         let foot = if self.note.is_empty() {
-            "Enter join · d leave · f forget · r look again · w radio · q quit".to_string()
+            "Enter join · d leave · f forget · r look again · w radio · ? help · q quit".to_string()
         } else {
             self.note.clone()
         };
@@ -381,6 +396,27 @@ impl Roam {
         };
         format!(" {mark} {}  {state}", style::rgb(&fit(&v.name, NAME_W), Some((225, 225, 230)), None, ""))
     }
+}
+
+/// The keys, in a box over the list; Esc, q or Enter closes it.
+fn help() {
+    let hdr = |s: &str| style::styled(s, Some(208), None, "b");
+    let key = |s: &str| style::styled(&format!("  {:<10}", s), Some(46), None, "");
+    let mut t = String::new();
+    t.push_str(&format!(" {}\n", hdr("NETWORKS")));
+    t.push_str(&format!("{}join the network under the cursor\n", key("Enter")));
+    t.push_str(&format!("{}leave the network you are on\n", key("d")));
+    t.push_str(&format!("{}forget a saved network, password and all\n", key("f")));
+    t.push_str(&format!("{}look for networks again\n", key("r")));
+    t.push_str(&format!("{}Wi-Fi radio on or off\n", key("w")));
+    t.push_str(&format!(" {}\n", hdr("VPN")));
+    t.push_str(&format!("{}bring the VPN under the cursor up or down\n", key("Enter")));
+    t.push_str(&format!(" {}\n", hdr("MOVING")));
+    t.push_str(&format!("{}down / up\n", key("j k ↓ ↑")));
+    t.push_str(&format!("{}top / bottom\n", key("g G")));
+    t.push_str(&format!("{}this help (Esc / q / Enter closes)\n", key("?")));
+    t.push_str(&format!("{}quit", key("q")));
+    Popup::centered(56, 15, 231, 236).view(&t);
 }
 
 /// Signal as four bars, lit to the strength.
