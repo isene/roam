@@ -88,6 +88,8 @@ pub enum Outcome {
 pub struct Nm {
     bus: Connection,
     wifi: Option<OwnedObjectPath>,
+    /// The Wi-Fi card's name, such as wlp0s20f3.
+    wifi_iface: String,
 }
 
 fn root() -> OwnedObjectPath {
@@ -97,8 +99,13 @@ fn root() -> OwnedObjectPath {
 impl Nm {
     pub fn new() -> zbus::Result<Nm> {
         let bus = Connection::system()?;
-        let mut nm = Nm { bus, wifi: None };
+        let mut nm = Nm { bus, wifi: None, wifi_iface: String::new() };
         nm.wifi = nm.find_wifi();
+        if let Some(w) = &nm.wifi {
+            nm.wifi_iface = nm.proxy(w.as_str(), DEVICE)
+                .and_then(|p| p.get_property::<String>("Interface").ok())
+                .unwrap_or_default();
+        }
         Ok(nm)
     }
 
@@ -160,6 +167,12 @@ impl Nm {
                             .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())
                             .map(|b| String::from_utf8_lossy(&b).to_string())
                             .unwrap_or_default();
+                        // A copy tied to another card ("wlan0", from
+                        // another machine) cannot run here.
+                        let bound = text(&s, "connection", "interface-name");
+                        if !bound.is_empty() && bound != self.wifi_iface {
+                            continue;
+                        }
                         // A live one wins over a spare copy of the same
                         // network ("Dualog 1").
                         let keep = !saved.contains_key(&ssid) || live.contains_key(c.as_str());
