@@ -122,8 +122,18 @@ impl Nm {
         Ok(nm)
     }
 
+    /// A handle on one NetworkManager object. zbus would cache its
+    /// properties: subscribe to their changes, fetch them all, and
+    /// unsubscribe when the handle goes, three extra messages for every
+    /// value roam reads once. Uncached, a read is one message.
     fn proxy<'a>(&'a self, path: &'a str, iface: &'a str) -> Option<Proxy<'a>> {
-        Proxy::new(&self.bus, NM, path, iface).ok()
+        zbus::blocking::proxy::Builder::new(&self.bus)
+            .destination(NM).ok()?
+            .path(path).ok()?
+            .interface(iface).ok()?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .ok()
     }
 
     fn find_wifi(&self) -> Option<OwnedObjectPath> {
