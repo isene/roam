@@ -6,6 +6,7 @@
 //! runs only while you look at it, where nm-applet sat in memory all day.
 
 mod nm;
+mod watch;
 
 use crust::{seq, style, Crust, Cursor, Input, Pane, Popup};
 use nm::{Lock, Look, Nm, Outcome};
@@ -46,6 +47,10 @@ fn main() {
         println!("roam {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    if arg == "--watch" {
+        watch::run();
+        return;
+    }
     if arg == "-h" || arg == "--help" {
         println!("roam — Wi-Fi and VPN in the terminal, straight to NetworkManager");
         println!();
@@ -54,8 +59,13 @@ fn main() {
         println!("  d              leave the network you are on");
         println!("  f              forget a saved network, password and all");
         println!("  r              look for networks again");
+        println!("  m              mark a saved network metered, or not");
         println!("  w              Wi-Fi radio on or off");
         println!("  q              quit");
+        println!();
+        println!("roam --watch     stay in the background: leave a metered network when a");
+        println!("                 saved one with a password comes in range, and bring the");
+        println!("                 VPN back if it was up (vpn_up / vpn_down in ~/.roamrc)");
         return;
     }
     let nm = match Nm::new() {
@@ -129,6 +139,7 @@ impl Roam {
                 "ENTER" => self.enter(),
                 "d" => self.leave(),
                 "f" => self.forget(),
+                "m" => self.metered(),
                 "r" => {
                     self.nm.scan();
                     self.rescan_at = Some(Instant::now() + Duration::from_secs(3));
@@ -271,6 +282,27 @@ impl Roam {
         self.refresh();
     }
 
+    /// m: mark the saved network under the cursor metered, or take the
+    /// mark off. `roam --watch` leaves a metered network for a better one.
+    fn metered(&mut self) {
+        let Some(Row::Net(i)) = self.rows().get(self.sel).copied() else {
+            self.note = "only a saved Wi-Fi network can be marked metered".into();
+            return;
+        };
+        let net = self.look.nets[i].clone();
+        let Some(saved) = &net.saved else {
+            self.note = format!("{} is not saved", net.ssid);
+            return;
+        };
+        let on = !net.metered;
+        self.note = match self.nm.set_metered(saved, on) {
+            Ok(()) if on => format!("{} is metered: roam --watch leaves it for a saved network with a password", net.ssid),
+            Ok(()) => format!("{} is no longer metered", net.ssid),
+            Err(e) => format!("{} stayed as it was: {e}", net.ssid),
+        };
+        self.refresh();
+    }
+
     fn ask_password(&mut self, ssid: &str) -> Option<String> {
         let (cols, rows) = Crust::terminal_size();
         let mut p = Pane::new(1, rows, cols, 1, 255, 236);
@@ -348,7 +380,7 @@ impl Roam {
 
         // The bar along the bottom: what just happened, or the keys.
         let foot = if self.note.is_empty() {
-            "Enter join · d leave · f forget · r look again · w radio · ? help · q quit".to_string()
+            "Enter join · d leave · f forget · m metered · r look again · w radio · ? help · q quit".to_string()
         } else {
             self.note.clone()
         };
@@ -383,7 +415,11 @@ impl Roam {
             style::rgb(&name, Some(DIM_RGB), None, "")
         };
         let lock = style::rgb(&format!("{:<6}", n.lock.label()), Some(if n.lock == Lock::Open { (230, 180, 90) } else { DIM_RGB }), None, "");
-        let saved = if n.saved.is_some() { style::rgb("saved", Some(IDLE_RGB), None, "") } else { String::new() };
+        let saved = match (n.saved.is_some(), n.metered) {
+            (true, true) => format!("{}  {}", style::rgb("saved", Some(IDLE_RGB), None, ""), style::rgb("metered", Some((230, 180, 90)), None, "")),
+            (true, false) => style::rgb("saved", Some(IDLE_RGB), None, ""),
+            _ => String::new(),
+        };
         format!(" {mark} {name}  {}  {lock}  {saved}", bars(n.strength))
     }
 
@@ -407,6 +443,7 @@ fn help() {
     t.push_str(&format!("{}join the network under the cursor\n", key("Enter")));
     t.push_str(&format!("{}leave the network you are on\n", key("d")));
     t.push_str(&format!("{}forget a saved network, password and all\n", key("f")));
+    t.push_str(&format!("{}mark a saved network metered, or not\n", key("m")));
     t.push_str(&format!("{}look for networks again\n", key("r")));
     t.push_str(&format!("{}Wi-Fi radio on or off\n", key("w")));
     t.push_str(&format!(" {}\n", hdr("VPN")));
@@ -416,7 +453,7 @@ fn help() {
     t.push_str(&format!("{}top / bottom\n", key("g G")));
     t.push_str(&format!("{}this help (Esc / q / Enter closes)\n", key("?")));
     t.push_str(&format!("{}quit", key("q")));
-    Popup::centered(56, 15, 231, 236).view(&t);
+    Popup::centered(56, 16, 231, 236).view(&t);
 }
 
 /// Signal as four bars, lit to the strength.

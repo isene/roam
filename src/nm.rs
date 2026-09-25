@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
-const NM: &str = "org.freedesktop.NetworkManager";
-const NM_PATH: &str = "/org/freedesktop/NetworkManager";
+pub const NM: &str = "org.freedesktop.NetworkManager";
+pub const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 const SETTINGS_PATH: &str = "/org/freedesktop/NetworkManager/Settings";
 const DEVICE: &str = "org.freedesktop.NetworkManager.Device";
-const WIRELESS: &str = "org.freedesktop.NetworkManager.Device.Wireless";
+pub const WIRELESS: &str = "org.freedesktop.NetworkManager.Device.Wireless";
 const AP: &str = "org.freedesktop.NetworkManager.AccessPoint";
 const SETTINGS: &str = "org.freedesktop.NetworkManager.Settings";
 const CONNECTION: &str = "org.freedesktop.NetworkManager.Settings.Connection";
@@ -58,6 +58,19 @@ pub struct Net {
     pub saved: Option<OwnedObjectPath>,
     /// The live connection, when this is the one in use.
     pub active: Option<OwnedObjectPath>,
+    /// Marked metered: a phone's hotspot, a data plan with a limit.
+    pub metered: bool,
+}
+
+/// A saved network worth leaving a metered one for: it has a password
+/// (so it is no captive portal), joins by itself, and is not metered.
+#[derive(Clone)]
+pub struct Better {
+    pub ssid: String,
+    pub conn: OwnedObjectPath,
+    pub priority: i32,
+    /// When it was last used, as NetworkManager counts it.
+    pub stamp: u64,
 }
 
 /// A VPN NetworkManager knows how to bring up.
@@ -149,43 +162,24 @@ impl Nm {
         }
 
         // What is saved: Wi-Fi by its network name, VPNs by theirs.
-        let mut saved: HashMap<String, OwnedObjectPath> = HashMap::new();
+        let mut saved: HashMap<String, (OwnedObjectPath, bool)> = HashMap::new();
         let mut vpns = Vec::new();
-        if let Some(settings) = self.proxy(SETTINGS_PATH, SETTINGS) {
-            let conns: Vec<OwnedObjectPath> = settings.call("ListConnections", &()).unwrap_or_default();
-            for c in conns {
-                let Some(p) = self.proxy(c.as_str(), CONNECTION) else { continue };
-                let Ok(s): Result<HashMap<String, HashMap<String, OwnedValue>>, _> = p.call("GetSettings", &()) else {
-                    continue;
-                };
-                let kind = text(&s, "connection", "type");
-                let id = text(&s, "connection", "id");
-                match kind.as_str() {
-                    "802-11-wireless" => {
-                        let ssid = s.get("802-11-wireless")
-                            .and_then(|w| w.get("ssid"))
-                            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())
-                            .map(|b| String::from_utf8_lossy(&b).to_string())
-                            .unwrap_or_default();
-                        // A copy tied to another card ("wlan0", from
-                        // another machine) cannot run here.
-                        let bound = text(&s, "connection", "interface-name");
-                        if !bound.is_empty() && bound != self.wifi_iface {
-                            continue;
-                        }
-                        // A live one wins over a spare copy of the same
-                        // network ("Dualog 1").
-                        let keep = !saved.contains_key(&ssid) || live.contains_key(c.as_str());
-                        if keep {
-                            saved.insert(ssid, c.clone());
-                        }
+        for (c, s) in self.saved_settings() {
+            match text(&s, "connection", "type").as_str() {
+                "802-11-wireless" => {
+                    let Some(ssid) = self.wifi_here(&s) else { continue };
+                    // A live one wins over a spare copy of the same
+                    // network ("Office 1").
+                    let keep = !saved.contains_key(&ssid) || live.contains_key(c.as_str());
+                    if keep {
+                        saved.insert(ssid, (c.clone(), metered_setting(&s) == 1));
                     }
-                    "vpn" | "wireguard" => {
-                        let active = live.get(c.as_str()).cloned();
-                        vpns.push(Vpn { name: id, conn: c.clone(), active });
-                    }
-                    _ => {}
                 }
+                "vpn" | "wireguard" => {
+                    let active = live.get(c.as_str()).cloned();
+                    vpns.push(Vpn { name: text(&s, "connection", "id"), conn: c.clone(), active });
+                }
+                _ => {}
             }
         }
         vpns.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -215,9 +209,12 @@ impl Nm {
                     }
                     continue;
                 }
-                let saved_conn = saved.get(&ssid).cloned();
+                let (saved_conn, metered) = match saved.get(&ssid) {
+                    Some((c, m)) => (Some(c.clone()), *m),
+                    None => (None, false),
+                };
                 let active = saved_conn.as_ref().and_then(|c| live.get(c.as_str()).cloned());
-                nets.push(Net { ssid, strength, lock, ap: ap.clone(), saved: saved_conn, active });
+                nets.push(Net { ssid, strength, lock, ap: ap.clone(), saved: saved_conn, active, metered });
             }
         }
         // The live one first, then the ones you have used, then the rest,
@@ -228,6 +225,168 @@ impl Nm {
         });
 
         Look { wifi_on, nets, vpns, now: self.now() }
+    }
+
+    /// Every saved connection with its settings.
+    fn saved_settings(&self) -> Vec<(OwnedObjectPath, Settings)> {
+        let Some(settings) = self.proxy(SETTINGS_PATH, SETTINGS) else { return Vec::new() };
+        let conns: Vec<OwnedObjectPath> = settings.call("ListConnections", &()).unwrap_or_default();
+        conns
+            .into_iter()
+            .filter_map(|c| {
+                let s: Settings = self.proxy(c.as_str(), CONNECTION)?.call("GetSettings", &()).ok()?;
+                Some((c, s))
+            })
+            .collect()
+    }
+
+    /// A saved Wi-Fi network's name, unless the copy is tied to another
+    /// card ("wlan0", from another machine) and cannot run here.
+    fn wifi_here(&self, s: &Settings) -> Option<String> {
+        let bound = text(s, "connection", "interface-name");
+        if !bound.is_empty() && bound != self.wifi_iface {
+            return None;
+        }
+        s.get("802-11-wireless")
+            .and_then(|w| w.get("ssid"))
+            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+    }
+
+    /// The saved networks worth leaving a metered one for, by name. Of two
+    /// copies of one network, the one NetworkManager would pick wins.
+    pub fn better(&self, skip: &[String]) -> HashMap<String, Better> {
+        let mut out: HashMap<String, Better> = HashMap::new();
+        for (c, s) in self.saved_settings() {
+            if text(&s, "connection", "type") != "802-11-wireless" {
+                continue;
+            }
+            let Some(ssid) = self.wifi_here(&s) else { continue };
+            let conn = s.get("connection");
+            let auto = conn.and_then(|g| g.get("autoconnect")).and_then(|v| bool::try_from(v.clone()).ok()).unwrap_or(true);
+            let locked = !text(&s, "802-11-wireless-security", "key-mgmt").is_empty();
+            if !auto || !locked || metered_setting(&s) == 1 || skip.contains(&ssid) {
+                continue;
+            }
+            let priority = conn.and_then(|g| g.get("autoconnect-priority")).and_then(|v| i32::try_from(v.clone()).ok()).unwrap_or(0);
+            let stamp = conn.and_then(|g| g.get("timestamp")).and_then(|v| u64::try_from(v.clone()).ok()).unwrap_or(0);
+            let b = Better { ssid: ssid.clone(), conn: c, priority, stamp };
+            match out.get(&ssid) {
+                Some(o) if (o.priority, o.stamp) >= (b.priority, b.stamp) => {}
+                _ => {
+                    out.insert(ssid, b);
+                }
+            }
+        }
+        out
+    }
+
+    /// Mark a saved network metered, or take the mark off. NetworkManager
+    /// replaces a connection whole on an update, so the password goes back
+    /// in with it.
+    pub fn set_metered(&self, saved: &OwnedObjectPath, on: bool) -> Result<(), String> {
+        let p = self.proxy(saved.as_str(), CONNECTION).ok_or("no such connection")?;
+        let mut s: Settings = p.call("GetSettings", &()).map_err(|e| short(&e))?;
+        if s.contains_key("802-11-wireless-security") {
+            let secrets: Settings = p.call("GetSecrets", &("802-11-wireless-security",)).map_err(|e| short(&e))?;
+            for (group, vals) in secrets {
+                s.entry(group).or_default().extend(vals);
+            }
+        }
+        // The old-style address lists would make NetworkManager ignore
+        // the address data that comes with them.
+        for g in ["ipv4", "ipv6"] {
+            if let Some(m) = s.get_mut(g) {
+                m.remove("addresses");
+                m.remove("routes");
+            }
+        }
+        let flag = OwnedValue::try_from(Value::from(if on { 1i32 } else { 0i32 })).map_err(|e| e.to_string())?;
+        s.entry("connection".into()).or_default().insert("metered".into(), flag);
+        p.call::<_, _, ()>("Update", &(s,)).map_err(|e| short(&e))
+    }
+
+    /// Whether the connection the machine is on counts as metered, marked
+    /// so or guessed by NetworkManager (an Android hotspot says so itself).
+    pub fn on_metered(&self) -> bool {
+        let m: u32 = self.proxy(NM_PATH, NM).and_then(|p| p.get_property("Metered").ok()).unwrap_or(0);
+        m == 1 || m == 3
+    }
+
+    pub fn bus(&self) -> &Connection {
+        &self.bus
+    }
+
+    pub fn wifi_path(&self) -> Option<&str> {
+        self.wifi.as_ref().map(|w| w.as_str())
+    }
+
+    /// Every access point in range: its network's name, itself, and its
+    /// signal.
+    pub fn in_air(&self) -> Vec<(String, OwnedObjectPath, u8)> {
+        let Some(w) = self.wifi.as_ref().and_then(|w| self.proxy(w.as_str(), WIRELESS)) else { return Vec::new() };
+        let aps: Vec<OwnedObjectPath> = w.call("GetAllAccessPoints", &()).unwrap_or_default();
+        aps.into_iter()
+            .map(|ap| {
+                let strength: u8 = self.proxy(ap.as_str(), AP).and_then(|p| p.get_property("Strength").ok()).unwrap_or(0);
+                (self.ap_ssid(ap.as_str()), ap, strength)
+            })
+            .collect()
+    }
+
+    /// A network's name, from its access point.
+    pub fn ap_ssid(&self, ap: &str) -> String {
+        let raw: Vec<u8> = self.proxy(ap, AP).and_then(|p| p.get_property("Ssid").ok()).unwrap_or_default();
+        String::from_utf8_lossy(&raw).trim_end_matches('\0').to_string()
+    }
+
+    /// The Wi-Fi connection in use: the live one and the saved one it
+    /// came from, and the network's name.
+    pub fn wifi_now(&self) -> Option<(OwnedObjectPath, OwnedObjectPath, String)> {
+        let dev = self.proxy(self.wifi.as_ref()?.as_str(), DEVICE)?;
+        let active: OwnedObjectPath = dev.get_property("ActiveConnection").ok()?;
+        if active.as_str() == "/" {
+            return None;
+        }
+        let (conn, id) = {
+            let a = self.proxy(active.as_str(), ACTIVE)?;
+            let conn: OwnedObjectPath = a.get_property("Connection").ok()?;
+            (conn, a.get_property::<String>("Id").unwrap_or_default())
+        };
+        Some((active, conn, id))
+    }
+
+    /// The saved VPNs that are up now.
+    pub fn vpns_up(&self) -> Vec<OwnedObjectPath> {
+        let Some(nm) = self.proxy(NM_PATH, NM) else { return Vec::new() };
+        let actives: Vec<OwnedObjectPath> = nm.get_property("ActiveConnections").unwrap_or_default();
+        actives
+            .iter()
+            .filter_map(|a| {
+                let p = self.proxy(a.as_str(), ACTIVE)?;
+                let kind: String = p.get_property("Type").unwrap_or_default();
+                let vpn = p.get_property::<bool>("Vpn").unwrap_or(false) || kind == "wireguard";
+                if vpn { p.get_property("Connection").ok() } else { None }
+            })
+            .collect()
+    }
+
+    /// Bring a saved Wi-Fi connection up, on the given access point or,
+    /// with none, on whichever NetworkManager picks.
+    pub fn activate(&self, saved: &OwnedObjectPath, ap: Option<&OwnedObjectPath>) -> Result<OwnedObjectPath, String> {
+        let wifi = self.wifi.clone().ok_or("no Wi-Fi card")?;
+        let nm = self.proxy(NM_PATH, NM).ok_or("no NetworkManager")?;
+        let any = root();
+        nm.call("ActivateConnection", &(saved, &wifi, ap.unwrap_or(&any))).map_err(|e| short(&e))
+    }
+
+    /// Ask NetworkManager to test the way out now: true when a captive
+    /// portal answers instead of the internet.
+    pub fn behind_portal(&self) -> bool {
+        const PORTAL: u32 = 2;
+        self.proxy(NM_PATH, NM)
+            .and_then(|p| p.call::<_, _, u32>("CheckConnectivity", &()).ok())
+            == Some(PORTAL)
     }
 
     /// What the machine is on, and the address it got.
@@ -339,8 +498,16 @@ impl Nm {
     }
 }
 
+/// A connection's settings, group by group.
+type Settings = HashMap<String, HashMap<String, OwnedValue>>;
+
+/// The metered mark a connection carries: 0 unset, 1 yes, 2 no.
+fn metered_setting(s: &Settings) -> i32 {
+    s.get("connection").and_then(|g| g.get("metered")).and_then(|v| i32::try_from(v.clone()).ok()).unwrap_or(0)
+}
+
 /// A setting's text, or nothing.
-fn text(s: &HashMap<String, HashMap<String, OwnedValue>>, group: &str, key: &str) -> String {
+fn text(s: &Settings, group: &str, key: &str) -> String {
     s.get(group)
         .and_then(|g| g.get(key))
         .and_then(|v| String::try_from(v.clone()).ok())
