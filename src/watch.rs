@@ -9,18 +9,25 @@
 //! It sleeps on D-Bus signals. On an unmetered network it hears only
 //! NetworkManager's own properties changing, which they do when the
 //! connection changes. On a metered one it also hears each access point
-//! NetworkManager's own scans turn up; it never scans by itself.
+//! a scan turns up, and asks for a scan every three minutes:
+//! NetworkManager looks by itself only when the signal gets weak, and a
+//! phone's hotspot in a pocket never does.
 
 use crate::nm::{Better, Nm, Outcome, NM, NM_PATH, WIRELESS};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use zbus::blocking::{fdo::DBusProxy, MessageIterator};
 use zbus::message::Type;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::MatchRule;
+
+/// How often to look for a better network while on a metered one.
+const LOOK_EVERY: Duration = Duration::from_secs(180);
 
 /// What `~/.roamrc` says to run for a VPN NetworkManager does not know.
 #[derive(Default)]
@@ -142,7 +149,7 @@ pub fn run() {
         std::process::exit(1);
     }
 
-    let mut w = Watch { nm, dbus, added, metered: false, better: HashMap::new(), rc: read_rc() };
+    let mut w = Watch { nm, dbus, added, metered: false, better: HashMap::new(), rc: read_rc(), looking: Arc::default() };
     w.sync();
     for msg in stream {
         let Ok(msg) = msg else { continue };
@@ -177,6 +184,9 @@ struct Watch {
     /// While metered: the saved networks worth switching to, by name.
     better: HashMap<String, Better>,
     rc: Rc,
+    /// Bumped on every change of metered: a scanning thread that sees a
+    /// number other than its own stops.
+    looking: Arc<AtomicU64>,
 }
 
 impl Watch {
@@ -187,7 +197,16 @@ impl Watch {
             return;
         }
         self.metered = now;
+        let round = self.looking.fetch_add(1, Ordering::Relaxed) + 1;
         if now {
+            let (nm, looking) = (self.nm.clone(), self.looking.clone());
+            std::thread::spawn(move || loop {
+                std::thread::sleep(LOOK_EVERY);
+                if looking.load(Ordering::Relaxed) != round {
+                    break;
+                }
+                nm.scan();
+            });
             self.better = self.nm.better(&portals());
             self.rc = read_rc();
             let _ = self.dbus.add_match_rule(self.added.clone());

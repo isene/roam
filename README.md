@@ -47,7 +47,7 @@ If the new network shows a login page after all, roam goes back and skips that n
 
 Mark the hotspot metered once with `m`, while it is in range. A notification tells you when roam switches.
 
-On an unmetered network the watcher does nothing at all: no wake-ups, measured over 30 seconds. On a metered one it wakes only when NetworkManager's own scans find a new access point. Start it with your session, for instance from `.tilerc` or `.xinitrc`. A second one stops at once.
+On an unmetered network the watcher does nothing at all: no wake-ups, measured over 30 seconds. On a metered one it asks for a Wi-Fi scan every three minutes. It also wakes when a scan finds a new access point. NetworkManager scans by itself only when the signal gets weak. A hotspot in your pocket stays strong, so a network you walk into would go unseen. Start it with your session, for instance from `.tilerc` or `.xinitrc`. A second one stops at once.
 
 ## How it talks
 

@@ -98,6 +98,7 @@ pub enum Outcome {
     Slow,
 }
 
+#[derive(Clone)]
 pub struct Nm {
     bus: Connection,
     wifi: Option<OwnedObjectPath>,
