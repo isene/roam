@@ -138,12 +138,21 @@ pub fn run() {
         eprintln!("roam: bad match rule");
         std::process::exit(1);
     };
-    let Ok(dbus) = DBusProxy::new(nm.bus()) else {
+    // The signals come in on a connection of their own. On the one the
+    // calls use, every reply is queued for the listener as well, and a
+    // burst of calls (the saved networks, read one by one) filled that
+    // queue while the listener itself waited for a reply: nothing moved
+    // again, and roam slept through the move home.
+    let Ok(signals) = zbus::blocking::Connection::system() else {
+        eprintln!("roam: cannot reach the system bus");
+        std::process::exit(1);
+    };
+    let Ok(dbus) = DBusProxy::new(&signals) else {
         eprintln!("roam: cannot reach the bus itself");
         std::process::exit(1);
     };
     // The stream first, so no signal falls between the rule and it.
-    let stream = MessageIterator::from(nm.bus());
+    let stream = MessageIterator::from(&signals);
     if dbus.add_match_rule(changed).is_err() {
         eprintln!("roam: the bus refused to pass on NetworkManager's changes");
         std::process::exit(1);
@@ -211,6 +220,11 @@ impl Watch {
             self.rc = read_rc();
             let _ = self.dbus.add_match_rule(self.added.clone());
             eprintln!("roam: on a metered network; {} saved networks would do better", self.better.len());
+            // One may be in range already: seen while the hotspot dropped
+            // out, it is no longer new when a scan finds it again.
+            if self.best_in_air().is_some() {
+                self.switch();
+            }
         } else {
             self.better.clear();
             let _ = self.dbus.remove_match_rule(self.added.clone());

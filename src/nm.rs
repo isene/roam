@@ -324,10 +324,6 @@ impl Nm {
         m == 1 || m == 3
     }
 
-    pub fn bus(&self) -> &Connection {
-        &self.bus
-    }
-
     pub fn wifi_path(&self) -> Option<&str> {
         self.wifi.as_ref().map(|w| w.as_str())
     }
