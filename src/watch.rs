@@ -12,14 +12,18 @@
 //! a scan turns up, and asks for a scan every three minutes:
 //! NetworkManager looks by itself only when the signal gets weak, and a
 //! phone's hotspot in a pocket never does.
+//!
+//! While on a metered network it also counts the data that goes through
+//! the Wi-Fi card, and writes the sum down at each of those looks:
+//! `~/.roam/usage`, a line a day and network. roam shows it in its top bar.
 
 use crate::nm::{Better, Nm, Outcome, NM, NM_PATH, WIRELESS};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zbus::blocking::{fdo::DBusProxy, MessageIterator};
 use zbus::message::Type;
@@ -74,6 +78,111 @@ fn remember_portal(ssid: &str) {
     all.push(ssid.to_string());
     let _ = fs::create_dir_all(home().join(".roam"));
     let _ = fs::write(portals_path(), all.join("\n") + "\n");
+}
+
+/// Where the kernel keeps each network card's counters.
+const SYS: &str = "/sys/class/net";
+
+/// The data used on metered networks: `2026-10-09<TAB>bytes<TAB>name`,
+/// a line a day and network.
+fn usage_path() -> PathBuf {
+    home().join(".roam").join("usage")
+}
+
+/// The day as 2026-10-09, by the clock on the wall.
+fn today() -> String {
+    // SAFETY: time takes a null pointer, and localtime_r fills the tm
+    // it is handed.
+    let tm = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+}
+
+/// Bytes in and out through a network card since it came up.
+fn counter(sys: &Path, iface: &str) -> Option<u64> {
+    let read = |f: &str| fs::read_to_string(sys.join(iface).join("statistics").join(f)).ok()?.trim().parse::<u64>().ok();
+    Some(read("rx_bytes")? + read("tx_bytes")?)
+}
+
+/// One line of the usage file: the day, the bytes, the network's name.
+fn fields(line: &str) -> Option<(&str, u64, &str)> {
+    let mut f = line.splitn(3, '\t');
+    Some((f.next()?, f.next()?.parse().ok()?, f.next()?))
+}
+
+/// The usage file with `bytes` more on `day` for the network `name`.
+/// Its line moves to the end, so the last line is the one counted last.
+fn add_use(text: &str, day: &str, name: &str, bytes: u64) -> String {
+    let mut sum = bytes;
+    let mut out = String::new();
+    for line in text.lines() {
+        match fields(line) {
+            Some((d, b, n)) if d == day && n == name => sum += b,
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str(&format!("{day}\t{sum}\t{name}\n"));
+    out
+}
+
+/// The network counted last, with its bytes on `day` and in that month.
+fn used(text: &str, day: &str) -> Option<(String, u64, u64)> {
+    let name = fields(text.lines().last()?)?.2;
+    let month = day.get(..7)?;
+    let (mut that_day, mut that_month) = (0, 0);
+    for (d, b, n) in text.lines().filter_map(fields) {
+        if n != name || !d.starts_with(month) {
+            continue;
+        }
+        that_month += b;
+        if d == day {
+            that_day += b;
+        }
+    }
+    (that_month > 0).then(|| (name.to_string(), that_day, that_month))
+}
+
+/// For roam's top bar: the metered network counted last, with its data
+/// today and this month. Nothing while the month has no count.
+pub fn used_now() -> Option<(String, u64, u64)> {
+    used(&fs::read_to_string(usage_path()).ok()?, &today())
+}
+
+/// The count of one metered network's data: which network, through
+/// which card, and what the card's counter said when it was last read.
+struct Meter {
+    name: String,
+    iface: String,
+    last: u64,
+}
+
+impl Meter {
+    /// Write down what went through the card since the last time.
+    fn tally(&mut self, sys: &Path, file: &Path, day: &str) {
+        let Some(now) = counter(sys, &self.iface) else { return };
+        // A counter that went back started again from nothing.
+        let more = if now >= self.last { now - self.last } else { now };
+        self.last = now;
+        if more == 0 {
+            return;
+        }
+        let text = add_use(&fs::read_to_string(file).unwrap_or_default(), day, &self.name, more);
+        if let Some(dir) = file.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        // Whole or not at all: roam may read it at any moment.
+        let tmp = file.with_extension("new");
+        if fs::write(&tmp, text).is_ok() {
+            let _ = fs::rename(&tmp, file);
+        }
+    }
 }
 
 /// A tunnel NetworkManager does not run, such as openfortivpn's: a ppp
@@ -158,7 +267,7 @@ pub fn run() {
         std::process::exit(1);
     }
 
-    let mut w = Watch { nm, dbus, added, metered: false, better: HashMap::new(), rc: read_rc(), looking: Arc::default() };
+    let mut w = Watch { nm, dbus, added, metered: false, better: HashMap::new(), rc: read_rc(), looking: Arc::default(), meter: Arc::default() };
     w.sync();
     for msg in stream {
         let Ok(msg) = msg else { continue };
@@ -196,6 +305,8 @@ struct Watch {
     /// Bumped on every change of metered: a scanning thread that sees a
     /// number other than its own stops.
     looking: Arc<AtomicU64>,
+    /// While on a metered Wi-Fi network: the count of its data.
+    meter: Arc<Mutex<Option<Meter>>>,
 }
 
 impl Watch {
@@ -207,12 +318,28 @@ impl Watch {
         }
         self.metered = now;
         let round = self.looking.fetch_add(1, Ordering::Relaxed) + 1;
+        // What went through up to now belongs to the network just left.
+        if let Ok(mut m) = self.meter.lock() {
+            if let Some(mut old) = m.take() {
+                old.tally(Path::new(SYS), &usage_path(), &today());
+            }
+            if now {
+                let iface = self.nm.wifi_iface().to_string();
+                *m = self.nm.wifi_now().and_then(|(_, _, name)| {
+                    let last = counter(Path::new(SYS), &iface)?;
+                    Some(Meter { name: name.replace(['\t', '\n'], " "), iface, last })
+                });
+            }
+        }
         if now {
-            let (nm, looking) = (self.nm.clone(), self.looking.clone());
+            let (nm, looking, meter) = (self.nm.clone(), self.looking.clone(), self.meter.clone());
             std::thread::spawn(move || loop {
                 std::thread::sleep(LOOK_EVERY);
                 if looking.load(Ordering::Relaxed) != round {
                     break;
+                }
+                if let Some(m) = meter.lock().ok().as_mut().and_then(|m| m.as_mut()) {
+                    m.tally(Path::new(SYS), &usage_path(), &today());
                 }
                 nm.scan();
             });
@@ -293,5 +420,53 @@ impl Watch {
             .filter_map(|(ssid, ap, strength)| self.better.get(&ssid).map(|b| (b.clone(), ap, strength)))
             .max_by_key(|(b, _, strength)| (b.priority, b.stamp, *strength))
             .map(|(b, ap, _)| (b, ap))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_days_data_adds_up_by_network() {
+        let mut t = add_use("", "2026-09-30", "Phone", 700);
+        t = add_use(&t, "2026-10-08", "Phone", 1000);
+        t = add_use(&t, "2026-10-09", "Cabin 4G", 50);
+        t = add_use(&t, "2026-10-09", "Phone", 300);
+        t = add_use(&t, "2026-10-09", "Phone", 200);
+        assert_eq!(t, "2026-09-30\t700\tPhone\n2026-10-08\t1000\tPhone\n2026-10-09\t50\tCabin 4G\n2026-10-09\t500\tPhone\n");
+        // The network counted last, today and this month; September is out.
+        assert_eq!(used(&t, "2026-10-09"), Some(("Phone".to_string(), 500, 1500)));
+        assert_eq!(used(&t, "2026-10-10"), Some(("Phone".to_string(), 0, 1500)));
+        assert_eq!(used(&t, "2026-11-01"), None);
+        assert_eq!(used("", "2026-10-09"), None);
+    }
+
+    #[test]
+    fn the_count_follows_the_cards_counter() {
+        let dir = std::env::temp_dir().join(format!("roam-test-{}", std::process::id()));
+        let stats = dir.join("wl0").join("statistics");
+        fs::create_dir_all(&stats).unwrap();
+        let set = |rx: u64, tx: u64| {
+            fs::write(stats.join("rx_bytes"), format!("{rx}\n")).unwrap();
+            fs::write(stats.join("tx_bytes"), format!("{tx}\n")).unwrap();
+        };
+        let file = dir.join("home").join("usage");
+        set(900, 100);
+        let mut m = Meter { name: "Phone".into(), iface: "wl0".into(), last: counter(&dir, "wl0").unwrap() };
+        m.tally(&dir, &file, "2026-10-09");
+        assert!(!file.exists(), "nothing went through, so nothing is written");
+        set(4900, 1100);
+        m.tally(&dir, &file, "2026-10-09");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "2026-10-09\t5000\tPhone\n");
+        // The card started over: what it shows now is all new.
+        set(100, 50);
+        m.tally(&dir, &file, "2026-10-09");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "2026-10-09\t5150\tPhone\n");
+        // A card that is gone changes nothing.
+        m.iface = "gone".into();
+        m.tally(&dir, &file, "2026-10-09");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "2026-10-09\t5150\tPhone\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

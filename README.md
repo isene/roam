@@ -49,6 +49,15 @@ Mark the hotspot metered once with `m`, while it is in range. A notification tel
 
 On an unmetered network the watcher does nothing at all: no wake-ups, measured over 30 seconds. On a metered one it asks for a Wi-Fi scan every three minutes. It also wakes when a scan finds a new access point. NetworkManager scans by itself only when the signal gets weak. A hotspot in your pocket stays strong, so a network you walk into would go unseen. Start it with your session, for instance from `.tilerc` or `.xinitrc`. A second one stops at once.
 
+## How much the hotspot has used
+
+While you are on a metered Wi-Fi network, `roam --watch` counts the data that goes through the Wi-Fi card.
+roam shows the sum at the top right: `Phone: 312 MB today, 4.1 GB this month`.
+The number is for this laptop alone, and the month is the calendar month.
+
+The count is written to `~/.roam/usage` every three minutes, at the same moment as the scan.
+So it costs no wake-up of its own. The file has one line a day and network: the date, the bytes, the name.
+
 ## How it talks
 
 Straight to NetworkManager over the system bus, the way nm-applet does. No `nmcli` is started.

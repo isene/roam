@@ -324,6 +324,11 @@ impl Nm {
         m == 1 || m == 3
     }
 
+    /// The Wi-Fi card's name, such as wlp0s20f3.
+    pub fn wifi_iface(&self) -> &str {
+        &self.wifi_iface
+    }
+
     pub fn wifi_path(&self) -> Option<&str> {
         self.wifi.as_ref().map(|w| w.as_str())
     }

@@ -39,6 +39,8 @@ struct Roam {
     note: String,
     /// When a scan was asked for, the moment its answer should be in.
     rescan_at: Option<Instant>,
+    /// The metered network counted last: its data today and this month.
+    used: Option<String>,
 }
 
 fn main() {
@@ -65,7 +67,9 @@ fn main() {
         println!();
         println!("roam --watch     stay in the background: leave a metered network when a");
         println!("                 saved one with a password comes in range, and bring the");
-        println!("                 VPN back if it was up (vpn_up / vpn_down in ~/.roamrc)");
+        println!("                 VPN back if it was up (vpn_up / vpn_down in ~/.roamrc).");
+        println!("                 It also counts the data a metered network carries;");
+        println!("                 roam shows the sum for today and this month, top right");
         return;
     }
     let nm = match Nm::new() {
@@ -76,7 +80,7 @@ fn main() {
         }
     };
     let look = nm.look();
-    let mut roam = Roam { nm, look, sel: 0, top: 0, note: String::new(), rescan_at: None };
+    let mut roam = Roam { nm, look, sel: 0, top: 0, note: String::new(), rescan_at: None, used: used_line() };
     if !roam.nm.has_wifi() {
         roam.note = "no Wi-Fi card here; VPNs only".into();
     }
@@ -162,6 +166,7 @@ impl Roam {
 
     fn refresh(&mut self) {
         self.look = self.nm.look();
+        self.used = used_line();
         let n = self.rows().len();
         if self.sel >= n {
             self.sel = n.saturating_sub(1);
@@ -326,12 +331,16 @@ impl Roam {
         // the bar's background, spaces included, so it runs unbroken.
         let now = format!("   {}", self.look.now);
         let used = 1 + "roam".len() + crust::display_width(&now);
+        // At the far right, where there is room: the metered data used.
+        let data = self.used.as_deref().filter(|d| used + crust::display_width(d) + 3 <= w).map(|d| format!("{d} ")).unwrap_or_default();
+        let pad = w.saturating_sub(used + crust::display_width(&data));
         out.push_str(&format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             Cursor::at(1, 1),
             style::rgb(" ", None, Some(BAR_BG), ""),
             style::rgb("roam", Some(RUST_RGB), Some(BAR_BG), "b"),
-            style::rgb(&format!("{now}{}", " ".repeat(w.saturating_sub(used))), Some((220, 220, 225)), Some(BAR_BG), "")
+            style::rgb(&format!("{now}{}", " ".repeat(pad)), Some((220, 220, 225)), Some(BAR_BG), ""),
+            style::rgb(&data, Some((230, 180, 90)), Some(BAR_BG), "")
         ));
 
         // The list, scrolled so the cursor stays in view.
@@ -434,6 +443,21 @@ impl Roam {
     }
 }
 
+/// What `roam --watch` has counted on the metered network used last.
+fn used_line() -> Option<String> {
+    let (name, day, month) = watch::used_now()?;
+    Some(format!("{name}: {} today, {} this month", amount(day), amount(month)))
+}
+
+/// Bytes as a phone plan counts them: 312 MB, 4.1 GB.
+fn amount(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1e6)
+    }
+}
+
 /// The keys, in a box over the list; Esc, q or Enter closes it.
 fn help() {
     let hdr = |s: &str| style::styled(s, Some(208), None, "b");
@@ -523,6 +547,14 @@ mod tests {
         assert_eq!(crust::display_width(&fit("☕ café wifi", 10)), 10);
         assert_eq!(crust::display_width(&fit("a very long network name indeed", 10)), 10);
         assert!(fit("a very long network name indeed", 10).contains('…'));
+    }
+
+    #[test]
+    fn data_reads_as_a_phone_plan_counts_it() {
+        assert_eq!(amount(0), "0 MB");
+        assert_eq!(amount(312_400_000), "312 MB");
+        assert_eq!(amount(999_600_000), "1000 MB");
+        assert_eq!(amount(4_130_000_000), "4.1 GB");
     }
 
     #[test]
