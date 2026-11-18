@@ -394,15 +394,16 @@ impl Roam {
             self.note.clone()
         };
         // The version at the far right, as across the suite.
-        let version = format!("v{} ", env!("CARGO_PKG_VERSION"));
-        let room = w.saturating_sub(version.len() + 3);
+        let version = crust::version_tag("roam", env!("CARGO_PKG_VERSION"));
+        let vw = crust::display_width(&version);
+        let room = w.saturating_sub(vw + 3);
         let foot = format!(" {}", take_cells(&foot, room));
-        let pad = w.saturating_sub(crust::display_width(&foot) + version.len());
+        let pad = w.saturating_sub(crust::display_width(&foot) + vw);
         out.push_str(&format!(
             "{}{}{}",
             Cursor::at(1, rows),
             style::rgb(&format!("{foot}{}", " ".repeat(pad)), Some((200, 200, 205)), Some(BAR_BG), ""),
-            style::rgb(&version, Some(DIM_RGB), Some(BAR_BG), "")
+            style::rgb(&version, None, Some(BAR_BG), "")
         ));
         print!("{out}");
         std::io::stdout().flush().ok();
